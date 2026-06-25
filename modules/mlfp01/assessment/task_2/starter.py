@@ -25,19 +25,71 @@ def solve() -> pl.DataFrame:
     loader = MLFPDataLoader()
     df = loader.load("mlfp01", "hdb_resale.parquet")
 
-    # TODO 1: sale_year  <- first 4 chars of "month" ("YYYY-MM"), as Int.
-    # TODO 2: storey_midpoint  <- parse "LO TO HI"; some digits are OCR'd as the
-    #         letter "O" (e.g. "4O TO 42"). Fix only the numeric tokens, then
-    #         average the two bounds. (Careful: "TO" itself contains an O.)
-    # TODO 3: flat_age_years  <- sale_year - lease_commence_date.
-    # TODO 4: price_per_sqm   <- resale_price / floor_area_sqm.
-    # TODO 5: flat_type_rooms <- ordinal map (2/3/4/5 ROOM -> 2..5,
-    #         EXECUTIVE -> 6, MULTI-GENERATION -> 7).
-    # TODO 6: remaining_lease_years <- parse BOTH "X years Y months" and bare
-    #         "X"; impute nulls as 99 - flat_age_years (statutory 99y lease).
-    # TODO 7: select the 10 columns in order, sort by [sale_year, town].
+    columns = [
+        "town",
+        "flat_type",
+        "flat_type_rooms",
+        "sale_year",
+        "storey_midpoint",
+        "floor_area_sqm",
+        "flat_age_years",
+        "remaining_lease_years",
+        "resale_price",
+        "price_per_sqm",
+    ]
 
-    return df  # <- replace with your 10-column engineered frame
+    df = (
+        df.with_columns(
+            pl.col("month").str.slice(0, 4).cast(pl.Int64).alias("sale_year"),
+            pl.col("storey_range")
+            .str.split_exact(" TO ", 1)
+            .struct.rename_fields(["lo", "hi"])
+            .alias("storey_parts"),
+            pl.col("remaining_lease")
+            .cast(pl.Utf8)
+            .str.extract(r"^(\d+)", 1)
+            .cast(pl.Float64)
+            .alias("lease_years"),
+            pl.col("remaining_lease")
+            .cast(pl.Utf8)
+            .str.extract(r"years\s+(\d+)\s+months", 1)
+            .cast(pl.Float64)
+            .fill_null(0.0)
+            .alias("lease_months"),
+        )
+        .unnest("storey_parts")
+        .with_columns(
+            pl.col("lo").str.replace_all("O", "0").cast(pl.Float64).alias("storey_lo"),
+            pl.col("hi").str.replace_all("O", "0").cast(pl.Float64).alias("storey_hi"),
+        )
+        .with_columns(
+            ((pl.col("storey_lo") + pl.col("storey_hi")) / 2).alias("storey_midpoint"),
+            (pl.col("sale_year") - pl.col("lease_commence_date")).alias("flat_age_years"),
+            (pl.col("resale_price") / pl.col("floor_area_sqm")).alias("price_per_sqm"),
+            pl.col("flat_type")
+            .replace(
+                {
+                    "2 ROOM": 2,
+                    "3 ROOM": 3,
+                    "4 ROOM": 4,
+                    "5 ROOM": 5,
+                    "EXECUTIVE": 6,
+                    "MULTI-GENERATION": 7,
+                }
+            )
+            .cast(pl.Int64)
+            .alias("flat_type_rooms"),
+        )
+        .with_columns(
+            (pl.col("lease_years") + pl.col("lease_months") / 12)
+            .fill_null(99 - pl.col("flat_age_years"))
+            .alias("remaining_lease_years")
+        )
+        .select(columns)
+        .sort(["sale_year", "town"])
+    )
+
+    return df
 
 
 if __name__ == "__main__":
